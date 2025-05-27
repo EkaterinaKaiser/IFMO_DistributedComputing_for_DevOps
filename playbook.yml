@@ -1,0 +1,138 @@
+---
+- name: Установка Docker и WordPress
+  hosts: wordpress
+  become: true
+  vars:
+    docker_version: latest
+    docker_compose_version: latest
+    mysql_root_password: "rootpassword"
+    mysql_dump_path: "/tmp/wordpress_dump.sql"
+  tasks:
+    - name: Установка Docker и необходимых пакетов
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - python3-pip
+          - python3-yaml
+          - mysql-server
+          - mysql-client
+          - python3-mysql.connector
+          - python3-mysqldb
+        state: present
+        update_cache: yes
+      register: docker_install
+
+    - name: Запуск Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Запуск MySQL
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Создание директории WordPress и копирование docker-compose
+      block:
+        - name: Создание директории WordPress
+          file:
+            path: /wordpress
+            state: directory
+            mode: '0755'
+        - name: Копирование docker-compose.yml
+          copy:
+            src: docker-compose.yml
+            dest: /wordpress/docker-compose.yml
+
+# раскомментировать при необходимости
+
+#    - name: Остановка и удаление существующих контейнеров
+#      docker_compose:
+#        project_src: /wordpress
+#        state: absent
+#        remove_orphans: yes
+
+#    - name: Удаление старых томов
+#      docker_volume:
+#        name: "{{ item }}"
+#        state: absent
+#      loop:
+#        - wordpress_wordpress_data
+#        - wordpress_db_data
+#        - wordpress_db2_data
+#      ignore_errors: true
+
+    - name: Запуск контейнеров WordPress
+      docker_compose:
+        project_src: /wordpress
+        state: present
+        remove_orphans: yes
+        build: no
+
+    - name: Ожидание готовности MySQL контейнера
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 3307
+        timeout: 300
+        delay: 10
+
+    - name: Получение списка запущенных контейнеров
+      shell: docker ps --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: docker_ps
+      changed_when: false
+
+    - name: Создание дампа из первого контейнера
+      community.mysql.mysql_db:
+        state: dump
+        name: wordpress
+        target: "{{ mysql_dump_path }}"
+        login_host: "{{ ansible_host }}"
+        login_port: 3307
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Импорт дампа в локальную MySQL
+      community.mysql.mysql_db:
+        state: import
+        name: wordpress
+        target: "{{ mysql_dump_path }}"
+        login_host: localhost
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Создание дампа из локальной MySQL
+      community.mysql.mysql_db:
+        state: dump
+        name: wordpress
+        target: "{{ mysql_dump_path }}.local"
+        login_host: localhost
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Импорт дампа во второй контейнер
+      community.mysql.mysql_db:
+        state: import
+        name: wordpress
+        target: "{{ mysql_dump_path }}.local"
+        login_host: "{{ ansible_host }}"
+        login_port: 3308
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      when: "'wordpress_db_2' in docker_ps.stdout_lines"
+
+    - name: Копирование плейбука резервного копирования
+      copy:
+        src: backup.yml
+        dest: /wordpress/backup.yml
+        mode: '0644'
+
+    - name: Настройка cron-задания для резервного копирования
+      cron:
+        name: "WordPress DB Backup"
+        job: "ansible-playbook /wordpress/backup.yml"
+        hour: "3"
+        minute: "0"
+        state: present 

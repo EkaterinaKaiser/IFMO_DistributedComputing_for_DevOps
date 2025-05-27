@@ -1,0 +1,60 @@
+---
+- name: Ежедневное резервное копирование WordPress
+  hosts: wordpress
+  become: true
+  vars:
+    mysql_root_password: "rootpassword"
+    mysql_dump_path: "/tmp/wordpress_dump.sql"
+  tasks:
+    - name: Получение списка запущенных контейнеров
+      shell: docker ps --format "{{ '{{' }}.Names{{ '}}' }}"
+      register: docker_ps
+      changed_when: false
+
+    - name: Создание дампа из первого контейнера
+      community.mysql.mysql_db:
+        state: dump
+        name: wordpress
+        target: "{{ mysql_dump_path }}"
+        login_host: "{{ ansible_host }}"
+        login_port: 3307
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Импорт дампа в локальную MySQL
+      community.mysql.mysql_db:
+        state: import
+        name: wordpress
+        target: "{{ mysql_dump_path }}"
+        login_host: localhost
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Создание дампа из локальной MySQL
+      community.mysql.mysql_db:
+        state: dump
+        name: wordpress
+        target: "{{ mysql_dump_path }}.local"
+        login_host: localhost
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Импорт дампа во второй контейнер
+      community.mysql.mysql_db:
+        state: import
+        name: wordpress
+        target: "{{ mysql_dump_path }}.local"
+        login_host: "{{ ansible_host }}"
+        login_port: 3308
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      when: "'wordpress_db_2' in docker_ps.stdout_lines"
+
+    - name: Очистка старых дампов
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ mysql_dump_path }}"
+        - "{{ mysql_dump_path }}.local"
+      when: item is file 
